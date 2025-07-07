@@ -1,4 +1,4 @@
-#New backup, not moving, with force, COM tracking and optimization.
+#Final code with working filaments. No active movment so does not move.
 
 import copy
 from scipy.interpolate import splprep, splev
@@ -14,7 +14,7 @@ from collections import deque
 GRID_SIZE = 75
 grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=int)
 
-#Define cell type and compartment: CELL_TYPE defines medium, cytoplasm and nuclues 
+#Define cell type and minumum sizes for connectivity test
 CELL_TYPE = [0,1,2,3,4,5] 
 min_sizes = {
         CELL_TYPE[0]: 20,  # ECM
@@ -35,14 +35,13 @@ cell_colors = mcolors.ListedColormap([
     'crimson',    # 4 - outer filament
     "black"        #5 - barrier
 ])
-
-#Custom color norm
 bounds = [0, 1, 2, 3, 4, 5,6] 
 norm = mcolors.BoundaryNorm(bounds, cell_colors.N)
 
 #Constants
 r1 = 8
 r2 = 4
+
 LAMBDA_VOLUME = 1
 LAMBDA_VOLUME_NUC = 1
 LAMBDA_SURFACE_NUC = 8
@@ -50,34 +49,40 @@ LAMBDA_SURFACE = 0.3
 LAMBDA_FORCE_NUC = 2
 LAMBDA_FORCE = 1
 LAMBDA_FIL= 1.5
+
 J_CN = -0.5
 J_CM = -0.1
 J_NM = 300
 J_CC = -1
 J_NN = -1
+
 TARGET_VOLUME_NUC = np.pi*r2**2
 TARGET_SURFACE = 2*np.pi*r1
 TARGET_VOLUME = np.pi*(r1**2-r2**2)
 TARGET_NUCLEUS = 2*np.pi*r2
+
 persistance_mu = 10**3
+
 TEMPERATURE = 800
 MC_STEPS = 3500
 interval = 10
+
 kx = 50
 
-# Number of pixel-flip attempts per MC step
 ATTEMPTS_PER_STEP = 1000
 
 
 
 #====================================
-#List of Pre-built Functions used in Logic
+#List of helper functions
 #====================================
 
-
-
-#Calculates the COM of a certain type of cell component
 def COM(grid,component):
+"""
+Calculates the COM of a the cell or of the nucleus
+
+Returns com: (x,y)
+"""
 
     #Boolean mask selecting cell or nucleus center of mass
     mask_cell = (grid == CELL_TYPE[1]) | (grid == CELL_TYPE[2]) | (grid == CELL_TYPE[3]) | (grid == CELL_TYPE[4])
@@ -102,17 +107,24 @@ def COM(grid,component):
         print("COM not found")
     return com
 
-#Calculate the longest length of the cell
+
 def max_length(grid):
+"""
+Calculates the maximum length of the ceell, used for persistance term
+
+Returns max_length
+"""
     presence_x = np.any(grid != 0, axis=1)
     presence_y = np.any(grid != 0, axis=0)
     return max(np.sum(presence_x), np.sum(presence_y))
 
 
-#Returns 4 valid neighbors and their types at a point
+
 def valid_neighbors(x, y, grid):
     """
-    Returns neighbors, a list of tuples and type_neighbors, a list of grid point values.
+    Returns the coordinates of each 4-neighbor as well as their type
+    
+    Returns neighbors: list of tuples and type_neighbors: a list of each type per coord
     """
     neighbors = []
     type_neighbors = []
@@ -124,8 +136,13 @@ def valid_neighbors(x, y, grid):
     return neighbors, type_neighbors
 
 
-#Find the coordinates of the perimeter of the cell
+#Finds the coordinates of the perimeter of the cell
 def perimeter(grid, component):
+"""
+Finds the coordinates of the perimeter of the cell
+
+Returns: out_perimeter_coords and in_perimeter_coords
+"""
     out_perimeter_coords = set()
     in_perimeter_coords = set()
 
@@ -146,26 +163,27 @@ def perimeter(grid, component):
 
     return out_perimeter_coords, in_perimeter_coords
 
-#precomuptes the filament neighbors and types
+#Precomuptes the neighbors of each filament
 def precompute_fil_neighbors(coords, grid):
+"""
+Precomuptes the neighbors of each filament
+
+Returns: neighbor_list and Type_list
+"""
     neighbor_list = []
     type_list = []
-
+   
     for coord in coords:
-        # Ensure coord is a length‐2 sequence before unpacking
         if not (isinstance(coord, (tuple, list)) and len(coord) == 2):
             raise ValueError(
                 f"Each entry in `coords` must be a 2‐tuple/list (x, y), but got: {coord}"
             )
         cx, cy = coord
 
-        # Now get the valid neighbors of (cx, cy)
         n_coords, n_types = valid_neighbors(cx, cy, grid)
 
-        # Store a set of the neighbor‐coordinates for fast membership tests
         neighbor_list.append(set(n_coords))
 
-        # Store the corresponding neighbor types in the same order as n_coords
         type_list.append(n_types.copy())
 
     return neighbor_list, type_list
@@ -176,6 +194,8 @@ def precompute_fil_neighbors(coords, grid):
 def bfs_component_size(grid, start, cell_type):
     """
     Find all connected cells of the same type starting from a given position.
+
+    Returns visted: a list of all cells found in BFS search
     """
     visited = set()
     queue = deque([start])
@@ -190,7 +210,7 @@ def bfs_component_size(grid, start, cell_type):
     
     return visited
 
-# General connectedness component check using BFS
+
 def is_connected_component(grid, cell_type, ignore_coord=None):
     """
     Check if ALL components of cell_type meet the minimum size requirement.
@@ -202,7 +222,7 @@ def is_connected_component(grid, cell_type, ignore_coord=None):
     if required_size == 0:
         return True 
 
-    # Find all components and check each one
+    #Goes through whole grid, the last check makse sure each component is searched once
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
             if (grid[i, j] == cell_type and 
@@ -211,22 +231,23 @@ def is_connected_component(grid, cell_type, ignore_coord=None):
                 
                 component = bfs_component_size(grid, (i, j), cell_type)
                 
-                # Mark all cells in this component as visited
+                #Adds visited to the larger visited array for each compoent
                 visited.update(component)
                 
-                # CRITICAL FIX: Check if this component is TOO SMALL
+          
                 if len(component) < required_size:
-                    return False  # Found a component that's too small
+                    return False  
     
-    # If we get here, all components meet the minimum size requirement
     return True
 
 
-# Check whether a coordinate is attached to the main body of a given type
+
 def is_attached_to_main_body(grid, coord, main_body_type):
     """
     Check if a coordinate is part of or adjacent to a component of main_body_type 
     that meets the minimum size requirement.
+
+    Returns False if not attached to a componet greater than min size
     """
     x, y = coord
     
@@ -242,34 +263,36 @@ def is_attached_to_main_body(grid, coord, main_body_type):
     neighbor_coords, *_ = valid_neighbors(x, y, grid)
     candidate_neighbors = [n for n in neighbor_coords if grid[n] == main_body_type]
     
+   #No main body neighbors, it's not attached. Solves filament islands
     if not candidate_neighbors:
-        return False  # Not adjacent
+        return False  
     
-    # Track which components we've already checked to avoid redundant BFS
+    
     checked_components = set()
-    
+        
+    #similar to connected function but just with the coords we care about
     for start in candidate_neighbors:
-        # Skip if this neighbor is part of a component we've already checked
+            
+        #Skips checked components
         if start in checked_components:
             continue
             
         connected = bfs_component_size(grid, start, main_body_type)
         
-        # Mark all cells in this component as checked
         checked_components.update(connected)
         
-        # Check component size
         component_size = len(connected) if connected else 0
         if component_size >= required_size:
             return True
     
     return False
 
-# Checks if a change preserves connectivity of relevant components
 def check_filament_connectivity(grid, filament_pos, filament_type, anchor_type):
     """
     Check if a filament at filament_pos is connected to cells of anchor_type
     that form a sufficiently large component.
+
+    Returns False if selected filament is not attached to main body
     """
     visited = set()
     queue = deque([filament_pos])
@@ -281,41 +304,45 @@ def check_filament_connectivity(grid, filament_pos, filament_type, anchor_type):
         
         for nx, ny in neighbors:
             if (nx, ny) not in visited:
+                #If the neighbor could be an anchor, check if it is attached to the main body
                 if grid[nx, ny] == anchor_type:
-                    # Check if this anchor cell is part of a large enough component
                     if is_attached_to_main_body(grid, (nx, ny), anchor_type):
-                        return True  # Found connection to sufficiently large anchor
+                        return True
+                 #otherwise it is a filament which we just skip and check respectively           
                 elif grid[nx, ny] == filament_type:
                     visited.add((nx, ny))
                     queue.append((nx, ny))
 
     return False
 
-# Modified connectivity check function
+
 def comprehensive_connectivity_check(grid, x, y, old_type, new_type):
+    """Tests if moving new type onto old type maintains conectivity
 
-    "Tests if moving new type onto old type maintains conectivity"
+    Use the prior connectivity functions to test globally if connectibity is broken
+    If True, no connectivity is broken
+"""
+        
 
-    # Store original value
+    #Creates a temp grip to test connectivity
     original = grid[x, y]
     grid[x, y] = new_type
     
     try:
-        # CRITICAL: Check that the change doesn't create undersized components
-        # For the old type, check if removing this cell creates small fragments
+        #Basic checks for old and new type
         if old_type in min_sizes:
             if not is_connected_component(grid, old_type, ignore_coord=(x, y)):
                 return False
         
-        # For the new type, check if all components (including new ones) are large enough
+
         if new_type in min_sizes:
             if not is_connected_component(grid, new_type):
                 return False
         
-        # Enhanced filament connectivity checks
+        #Filament check
         filament_check_passed = True
         for filament_outer, filament_inner in Filaments:
-            # Verify filament positions still contain filament types
+            # Verify filament positions still contain filament types, keeps the filaments from disappearing
             if grid[filament_outer] != CELL_TYPE[4] or grid[filament_inner] != CELL_TYPE[3]:
                 filament_check_passed = False
                 break
@@ -336,34 +363,27 @@ def comprehensive_connectivity_check(grid, x, y, old_type, new_type):
         grid[x, y] = original
 
 
-def extend_force(extension):
-    return -LAMBDA_FORCE*extension
-
-
-
 #=====================
 #Intialization of Grid
 #=====================
-
 def cell_field(grid):
 
     center_x = 40
     center_y = 33
-    max_width = 12      # Maximum funnel half-width at edges
-    gap_size = 4        # Minimum half-gap at center_x (opening is 2 * gap_size)
+    max_width = 12      
+    gap_size = 4       
 
+        #Generates a double funnel barrier
     for x in range(20, 61):
         distance_from_center = abs(x - center_x)
         funnel_width = int((distance_from_center / (center_x - 20)) * max_width)
 
-        # Total allowed vertical gap at this x
         vertical_half_gap = max(gap_size, funnel_width)
 
         top_y = center_y + vertical_half_gap
         bottom_y = center_y - vertical_half_gap
 
         for y in range(grid.shape[1]):
-            # Add barrier above and below the gap
             if y > top_y or y < bottom_y:
                 grid[x, y] = CELL_TYPE[5]
 
@@ -378,6 +398,7 @@ def cell_field(grid):
             
 
 #Places filaments and keeps track of original length
+#Also palces them along roots of unity
 def filament_place(grid, n=4):
     out, inner = perimeter(grid, 1)
     filament_list = []
@@ -398,12 +419,12 @@ def filament_place(grid, n=4):
         found_inner = None
         found_outer = None
 
-        # Trace along the angle from center outward
+        #
         for r in np.linspace(1, max(grid.shape), num=500):
             point = tuple(np.round(center + r * direction).astype(int))
 
             if not (0 <= point[0] < grid.shape[0] and 0 <= point[1] < grid.shape[1]):
-                break  # Out of bounds
+                break  
 
             if found_inner is None and point in inner_set and point not in used_inner and grid[point] != CELL_TYPE[3]:
                 found_inner = point
@@ -499,21 +520,24 @@ def adhesion_energy_int(grid):
                         adhesion_energy_sum += J_NN
     return adhesion_energy_sum
 
+#Hooke's law
+def extend_force(extension):
+    return -LAMBDA_FORCE*extension
+
 #Determines the total filament work on the nucleus and between the two ends of the filament
 def filament_work(grid):
     COM_nuc = COM(grid, "nuc")
 
-    # Compute lengths of current filaments
+    # Computes the current length of filaments
     fil_length = np.array([
         np.linalg.norm(np.array(fil[0]) - np.array(fil[1]))
         for fil in Filaments
     ])
 
-    # Failsafe
     if len(fil_length) == 0:
         return 0.0
 
-    # Extension of the filaments w.r.t original length
+    # Extension of the filaments w.r.t original length and force calulated
     extension = fil_length - length_0
     force = extend_force(extension) 
 
@@ -527,28 +551,24 @@ def filament_work(grid):
         endpoint_outer = np.array(fil[0])
         endpoint_inner = np.array(fil[1])
 
-        # Displacement vectors
+
         disp_inner = endpoint_inner - COM_nuc
         disp_fil = endpoint_outer - endpoint_inner
 
         norm_inner = np.linalg.norm(disp_inner)
         norm_fil = np.linalg.norm(disp_fil)
 
-        if norm_inner == 0 or norm_fil == 0:
-            continue  # skip degenerate case
-
         unit_inner = disp_inner / norm_inner
         unit_fil = disp_fil / norm_fil
 
-        # Extension vectors
+
         extension_inner_vec = unit_inner * (norm_inner - r2)
         extension_fil_vec = unit_fil * (norm_fil - length_0[idx])
 
-        # Forces
+
         force_nuc = LAMBDA_FORCE_NUC * extension_inner_vec
         force_fil = LAMBDA_FIL * extension_fil_vec
 
-        # Work: dot(force, displacement_dir)
         work_nuc = np.dot(force_nuc, unit_inner)
         work_fil = np.dot(force_fil, unit_fil)
 
@@ -559,11 +579,9 @@ def filament_work(grid):
 #gradient function
 def gradient(point):
     x, y = point[0], point[1]
-    target_x= 60  # Exit of the channel
+    target_x= 60  
 
-    # Define regions
     if x < 60:
-        # Region before tunnel exit: strong pull toward the exit point
         return kx * (x - target_x)**2 
 
  
@@ -580,6 +598,11 @@ def total_energy_cell(grid):
 
 #Simple swap logic
 def simple_swap(grid, Filaments, old_coord, neighbor_coord, filament_type, perim, perim_type):
+
+"""
+Checks if you can simple swap the old type and new type
+Returns True if swapped
+"""
     x, y = old_coord
     nx, ny = neighbor_coord
 
@@ -589,7 +612,7 @@ def simple_swap(grid, Filaments, old_coord, neighbor_coord, filament_type, perim
     if not (((nx, ny) in perim) and ((x, y) in perim)):
         return swapped
 
-    # Identify which filament this coordinate belongs to
+    # Identify which filament is to be swapped
     fil_index = None
     for i, (outer, inner) in enumerate(Filaments):
         if filament_type == CELL_TYPE[3] and inner == (x, y):
@@ -608,6 +631,7 @@ def simple_swap(grid, Filaments, old_coord, neighbor_coord, filament_type, perim
     if fil_index is None:
         return swapped
 
+
     # Swap in the grid
     grid[x, y], grid[nx, ny] = grid[nx, ny], grid[x, y]
 
@@ -616,72 +640,73 @@ def simple_swap(grid, Filaments, old_coord, neighbor_coord, filament_type, perim
         grid[x, y], grid[nx, ny] = grid[nx, ny], grid[x, y]  # revert
         return swapped
 
-    # FIXED: Update filament endpoint based on which coordinate actually has the filament
+    #Updates filament list
     outer, inner = Filaments[fil_index]
-    if filament_type == CELL_TYPE[3]:  # Inner filament
+    if filament_type == CELL_TYPE[3]:  
         if inner == (x, y):
-            # Inner endpoint was at (x, y), now move it to (nx, ny)
             Filaments[fil_index] = (outer, (nx, ny))
         elif inner == (nx, ny):
-            # Inner endpoint was at (nx, ny), now move it to (x, y)
             Filaments[fil_index] = (outer, (x, y))
-    else:  # Outer filament (CELL_TYPE[4])
+    else:  
         if outer == (x, y):
-            # Outer endpoint was at (x, y), now move it to (nx, ny)
             Filaments[fil_index] = ((nx, ny), inner)
         elif outer == (nx, ny):
-            # Outer endpoint was at (nx, ny), now move it to (x, y)
             Filaments[fil_index] = ((x, y), inner)
 
-    swapped = True  # ALSO FIXED: This was missing!
+    swapped = True  
     return swapped
 
 def passive_movement(old_coord, new_type, filament_type, neighbors, outer_perim, inner_perim):
+""" Checks if any passive movement occurs do to copy attempt
+Returns True if passive movement occurs
+"""
+        
     x, y = old_coord
     moved = False
 
-    # Filament-specific properties
-    if filament_type == CELL_TYPE[4]:  # Outer filament (integrin)
-        extend_type = CELL_TYPE[1]     # Cytoplasm
-        retract_type = CELL_TYPE[0]    # ECM
+    #For generality, defines extend and retract type as well as which perimeter is used per filament type
+    if filament_type == CELL_TYPE[4]:  
+        extend_type = CELL_TYPE[1]     
+        retract_type = CELL_TYPE[0]    
         valid_perimeter = outer_perim
-    elif filament_type == CELL_TYPE[3]:  # Inner filament (intermediate)
-        extend_type = CELL_TYPE[2]       # Nucleus
-        retract_type = CELL_TYPE[1]      # Cytoplasm
+    elif filament_type == CELL_TYPE[3]:  
+        extend_type = CELL_TYPE[2]       
+        retract_type = CELL_TYPE[1]      
         valid_perimeter = inner_perim
     else:
         return moved
 
-    # FIXED: Find filament that has an endpoint adjacent to (x, y), not AT (x, y)
+    #Initialise filament index and postion for Filaments update
     fil_index = None
     filament_endpoint_pos = None
     
     for idx, (outer, inner) in enumerate(Filaments):
         endpoint = outer if filament_type == CELL_TYPE[4] else inner
         
-        # Check if the filament endpoint is adjacent to the changing position
+        # Check if the filament endpoint is adjacent to the changing position and already on the perimeter
         if endpoint in neighbors and endpoint in valid_perimeter:
             filament_endpoint_pos = endpoint
             fil_index = idx
             break
 
+   #If no filament is found, exit
     if fil_index is None or filament_endpoint_pos is None:
         return moved
 
-    # Only proceed if new_type is valid for extension/retraction
+    # Only proceed if new_type is valid for extension/retraction, failsafe
     if new_type not in (extend_type, retract_type):
         return moved
 
+    #We use a test grid for this
     old_grid = grid.copy()
     old_filaments = copy.deepcopy(Filaments)
 
-    # The change at (x, y) to new_type has already been made by the caller
-    # Now we need to determine if the adjacent filament should extend or retract
+    #Try copy attempt
+    grid[x,y] = new_type
 
     # Check what surrounds the current filament endpoint (excluding the position that just changed)
     fil_neighbors = []
     for nx, ny in valid_neighbors(*filament_endpoint_pos, grid)[0]:
-        if (nx, ny) != (x, y):  # Exclude the position that just changed
             fil_neighbors.append(grid[nx, ny])
     
     fil_neigh_set = set(fil_neighbors)
@@ -694,7 +719,6 @@ def passive_movement(old_coord, new_type, filament_type, neighbors, outer_perim,
         
         # Check connectivity after the move
         if check_filament_connectivity(grid, (x, y), filament_type, extend_type):
-            # Update filament tracking - endpoint moves to (x, y)
             outer, inner = Filaments[fil_index]
             if filament_type == CELL_TYPE[4]:
                 Filaments[fil_index] = ((x, y), inner)
@@ -708,24 +732,17 @@ def passive_movement(old_coord, new_type, filament_type, neighbors, outer_perim,
 
     # --- Retraction: Filament pulls back from changing position ---
     elif new_type == retract_type and fil_neigh_set.issubset({retract_type}):
-        # Filament retracts: endpoint disappears, gets replaced by retract_type
+        # Move filament endpoint to (x, y) and fill old position with extend_type
+        grid[x, y] = filament_type
         grid[filament_endpoint_pos] = retract_type
-        # (x, y) keeps its new_type as set by caller
         
-        # Find new filament endpoint by walking back along the filament
-        new_endpoint = None
-        for nx, ny in valid_neighbors(*filament_endpoint_pos, grid)[0]:
-            if (nx, ny) != (x, y) and grid[nx, ny] == filament_type:
-                new_endpoint = (nx, ny)
-                break
-        
-        if new_endpoint and check_filament_connectivity(grid, new_endpoint, filament_type, retract_type):
-            # Update filament tracking - endpoint moves back
+        # Check connectivity after the move
+        if check_filament_connectivity(grid, (x, y), filament_type, retract_type):
             outer, inner = Filaments[fil_index]
             if filament_type == CELL_TYPE[4]:
-                Filaments[fil_index] = (new_endpoint, inner)
+                Filaments[fil_index] = ((x, y), inner)
             else:
-                Filaments[fil_index] = (outer, new_endpoint)
+                Filaments[fil_index] = (outer, (x, y))
             moved = True
         else:
             # Revert changes
@@ -733,8 +750,6 @@ def passive_movement(old_coord, new_type, filament_type, neighbors, outer_perim,
             Filaments[:] = old_filaments
 
     return moved
-
-
 
 
 
@@ -805,7 +820,7 @@ def attempt_flip(grid, persist,length):
 
     #If no filament logic has occured
     if not swapped and not simple_swapped:
-        #Use test connectivity check, then make the change
+        #Use dull connectivity check, then make the change
         if not comprehensive_connectivity_check(grid, x, y, old_type, new_type):
             return delta_energy
         grid[x, y] = new_type
@@ -839,7 +854,7 @@ def attempt_swap(grid, failed_delta_energy, length):
     if not Filaments or failed_delta_energy is None:
         return 0.0
 
-    # Make a copy of the grid to simulate the swap safely
+    # Make a copy of the grid for reversion
     temp_grid = grid.copy()
 
 
@@ -894,8 +909,9 @@ com_history = []
 com_nucl_list = []
 
 def visualize(grid, step, COM,com_history,COM_nuc,com_nucl_list):
-
+    #Fixes difference betwene numpy grid and python grid
     grid = np.transpose(grid)
+        
     #Adds new COM into the array
     com_history.append(COM)
     com_nucl_list.append(COM_nuc)
@@ -906,28 +922,26 @@ def visualize(grid, step, COM,com_history,COM_nuc,com_nucl_list):
 
     # Plot COM history as a red line, tracking cell movement
     plt.plot(xs, ys, 'r-', linewidth=1,label = "Cell COM")   
-    plt.plot(xs[-1], ys[-1], 'ro',markersize=1)      
+    plt.plot(xs[-1], ys[-1], 'ro',markersize=1) 
+        
     #Plot COM nuc hist as blue line
     plt.plot(xn, yn, 'b-', linewidth=1,label = "Nucleus COM")   
     plt.plot(xn[-1], yn[-1], 'bo',markersize=1)
    
 
-     # Draw curved lines between filament using bezier curve
+ #Draws a quadratic bezier curve between filament points, if there's an error just make a straight line
     for outer, inner in Filaments:
         x0, y0 = outer
         x1, y1 = inner
 
-        # Create a control point between the two with a slight curve (midpoint raised)
         mx, my = (x0 + x1) / 2, (y0 + y1) / 2 + 0.5  
 
         try:
-            # Build spline path from 3 control points
             tck, _ = splprep([[x0, mx, x1], [y0, my, y1]], k=2)
             u_fine = np.linspace(0, 1, 100)
             smoothed = splev(u_fine, tck)
             plt.plot(smoothed[0], smoothed[1], color='black', linewidth=0.5, alpha=0.5)
         except ValueError:
-            # Fallback: draw straight line if splprep fails
             plt.plot([x0, x1], [y0, y1], color='black', linewidth=0.5, alpha=0.5) 
     
     plt.imshow(grid, cmap = cell_colors, norm=norm, origin= "lower")
@@ -982,16 +996,6 @@ def run_simulation():
         COM_dyn.put(COM(grid, 'cell'))
         velocity.get()
         velocity.put(COM_dyn.queue[1]-COM_dyn.queue[0])
-
-
-        if step % 50 == 0:
-            current_com = COM(grid, "cell")
-            if last_com is not None:
-                movement = np.linalg.norm(np.array(current_com) - np.array(last_com))
-                if movement < 1.0:  # Stuck
-                    TEMPERATURE += 100  # Boost temperature
-                    J_NM = max(100, J_NM - 20)  # Reduce sticking
-            last_com = current_com
 
 
         current_energy = total_energy_cell(grid) + persist
